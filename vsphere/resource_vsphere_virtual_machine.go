@@ -1,6 +1,7 @@
 package vsphere
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log"
@@ -11,7 +12,9 @@ import (
 	"github.com/terraform-providers/terraform-provider-vsphere/vsphere/internal/helper/datastore"
 	"github.com/terraform-providers/terraform-provider-vsphere/vsphere/internal/helper/folder"
 	"github.com/terraform-providers/terraform-provider-vsphere/vsphere/internal/helper/hostsystem"
+	"github.com/terraform-providers/terraform-provider-vsphere/vsphere/internal/helper/provider"
 	"github.com/terraform-providers/terraform-provider-vsphere/vsphere/internal/helper/resourcepool"
+	"github.com/terraform-providers/terraform-provider-vsphere/vsphere/internal/helper/storagepod"
 	"github.com/terraform-providers/terraform-provider-vsphere/vsphere/internal/helper/structure"
 	"github.com/terraform-providers/terraform-provider-vsphere/vsphere/internal/helper/viapi"
 	"github.com/terraform-providers/terraform-provider-vsphere/vsphere/internal/helper/virtualmachine"
@@ -683,15 +686,6 @@ func resourceVSphereVirtualMachineCreateBare(d *schema.ResourceData, meta interf
 		return nil, fmt.Errorf("error in virtual machine configuration: %s", err)
 	}
 
-	// Set the datastore for the VM.
-	ds, err := datastore.FromID(client, d.Get("datastore_id").(string))
-	if err != nil {
-		return nil, fmt.Errorf("error locating datastore for VM: %s", err)
-	}
-	spec.Files = &types.VirtualMachineFileInfo{
-		VmPathName: fmt.Sprintf("[%s]", ds.Name()),
-	}
-
 	// Now we need to get the default device set - this is available in the
 	// environment info in the resource pool, which we can then filter through
 	// our device CRUD lifecycles to get a full deviceChange attribute for our
@@ -704,6 +698,26 @@ func resourceVSphereVirtualMachineCreateBare(d *schema.ResourceData, meta interf
 
 	if spec.DeviceChange, err = applyVirtualDevices(d, client, devices); err != nil {
 		return nil, err
+	}
+
+	if _, ok := d.GetOk("datastore_cluster_id"); ok {
+		// We've selected a datastore cluster here instead of individual
+		// datastores. And our spec is still incomplete as our
+		// disk backings will be missing from the spec. Populate those now.
+		if spec, err = resourceVSphereVirtualMachineCreateBarePopulateStoragePod(d, client, spec, pool); err != nil {
+			return nil, err
+		}
+	} else {
+		// We have a static datastore and our spec should be largely complete, save
+		// the datastore for the virtual machine config. Save this now.
+		if spec, err = resourceVSphereVirtualMachineCreateBarePopulateVmxDatastore(
+			d,
+			client,
+			spec,
+			d.Get("datastore_id").(string),
+		); err != nil {
+			return nil, err
+		}
 	}
 
 	// We should now have a complete configSpec! Attempt to create the VM now.
@@ -998,4 +1012,226 @@ func applyVirtualDevices(d *schema.ResourceData, c *govmomi.Client, l object.Vir
 // vsphere_virtual_machine resource.
 func resourceVSphereVirtualMachineIDString(d structure.ResourceIDStringer) string {
 	return structure.ResourceIDString(d, "vsphere_virtual_machine")
+}
+
+// resourceVSphereVirtualMachineCreateBarePopulateStoragePod performs storage
+// DRS transformations to a VirtualMachineConfigSpec for the "bare metal", or
+// from scratch, VM creation path. This is accomplished by doing a storage DRS
+// recommendation against the datastore cluster specified, with the
+// recommendations from the operation applied to the config spec directly. The
+// recommendations themselves are dropped after the fact and left to expire.
+func resourceVSphereVirtualMachineCreateBarePopulateStoragePod(
+	d *schema.ResourceData,
+	client *govmomi.Client,
+	spec types.VirtualMachineConfigSpec,
+	pool *object.ResourcePool,
+) (types.VirtualMachineConfigSpec, error) {
+	if err := viapi.ValidateVirtualCenter(client); err != nil {
+		return spec, errors.New("assignment of a virtual machine to a datastore cluster requires vCenter")
+	}
+
+	log.Printf("[DEBUG] %s: Getting storage DRS recommendations for VM creation", resourceVSphereVirtualMachineIDString(d))
+
+	pod, err := storagepod.FromID(client, d.Get("datastore_cluster_id").(string))
+	if err != nil {
+		return spec, fmt.Errorf("error locating datastore cluster for initial VM placement: %s", err)
+	}
+	sps := resourceVSphereVirtualMachineStoragePlacementSpecForCreate(d, spec, pool, pod)
+	srm := object.NewStorageResourceManager(client.Client)
+	ctx, cancel := context.WithTimeout(context.Background(), provider.DefaultAPITimeout)
+	defer cancel()
+	result, err := srm.RecommendDatastores(ctx, sps)
+	if err != nil {
+		return spec, fmt.Errorf("error getting storage DRS recommendations: %s", err)
+	}
+
+	if len(result.Recommendations) < 1 {
+		return spec, errors.New("no storage DRS recommendations were returned. Please check your datastore cluster settings and try again")
+	}
+
+	spec, err = resourceVSphereVirtualMachineApplySDRSRecommendationsToConfigSpec(d, client, result.Recommendations, spec)
+	if err != nil {
+		return spec, fmt.Errorf("error applying SDRS recommendations to config spec: %s", err)
+	}
+
+	log.Printf("[DEBUG] %s: Storage DRS recommendations applied successfully", resourceVSphereVirtualMachineIDString(d))
+	return spec, nil
+}
+
+// resourceVSphereVirtualMachineCreateBarePopulateVmxDatastore populates the
+// datastore for the virtual machine configuration during the creation stage of
+// a virtual machine.
+func resourceVSphereVirtualMachineCreateBarePopulateVmxDatastore(
+	d structure.ResourceIDStringer,
+	client *govmomi.Client,
+	spec types.VirtualMachineConfigSpec,
+	id string,
+) (types.VirtualMachineConfigSpec, error) {
+	ds, err := datastore.FromID(client, id)
+	if err != nil {
+		return spec, fmt.Errorf("error locating datastore for VM configuration: %s", err)
+	}
+
+	log.Printf("[DEBUG] %s: Datastore for VMX configuration is %q", resourceVSphereVirtualMachineIDString(d), ds.Name())
+	spec.Files = &types.VirtualMachineFileInfo{
+		VmPathName: fmt.Sprintf("[%s]", ds.Name()),
+	}
+
+	return spec, nil
+}
+
+func resourceVSphereVirtualMachineStoragePlacementSpecForCreate(
+	d *schema.ResourceData,
+	spec types.VirtualMachineConfigSpec,
+	pool *object.ResourcePool,
+	pod *object.StoragePod,
+) types.StoragePlacementSpec {
+	log.Printf("[DEBUG] %s: Creating StoragePodPlacementSpec for creation", resourceVSphereVirtualMachineIDString(d))
+
+	pr := pool.Reference()
+	sps := types.StoragePlacementSpec{
+		Type:         string(types.StoragePlacementSpecPlacementTypeCreate),
+		ResourcePool: &pr,
+		ConfigSpec:   &spec,
+	}
+	sps.PodSelectionSpec = resourceVSphereVirtualMachineStorageDrsPodSelectionSpecForCreate(d, spec, pod)
+
+	return sps
+}
+
+func resourceVSphereVirtualMachineStorageDrsPodSelectionSpecForCreate(
+	d structure.ResourceIDStringer,
+	spec types.VirtualMachineConfigSpec,
+	pod *object.StoragePod,
+) types.StorageDrsPodSelectionSpec {
+	log.Printf("[DEBUG] %s: Creating StorageDrsPodSelectionSpec for creation", resourceVSphereVirtualMachineIDString(d))
+
+	pr := pod.Reference()
+	pss := types.StorageDrsPodSelectionSpec{
+		StoragePod: &pr,
+	}
+	pss.InitialVmConfig = resourceVSphereVirtualMachineVmPodConfigForPlacementForCreate(d, spec, pod)
+
+	return pss
+}
+
+func resourceVSphereVirtualMachineVmPodConfigForPlacementForCreate(
+	d structure.ResourceIDStringer,
+	spec types.VirtualMachineConfigSpec,
+	pod *object.StoragePod,
+) []types.VmPodConfigForPlacement {
+	log.Printf("[DEBUG] %s: Creating VmPodConfigForPlacement for creation", resourceVSphereVirtualMachineIDString(d))
+	return resourceVSphereVirtualMachineVmPodConfigForPlacementAppendNewDisks(nil, d, spec, pod)
+}
+
+func resourceVSphereVirtualMachineStoragePodDiskFilter(
+	deviceChange []types.BaseVirtualDeviceConfigSpec,
+	operation types.VirtualDeviceConfigSpecOperation,
+	fileOperation types.VirtualDeviceConfigSpecFileOperation,
+) []*types.VirtualDisk {
+	var disks []*types.VirtualDisk
+	for _, dc := range deviceChange {
+		spec := dc.GetVirtualDeviceConfigSpec()
+		if spec.Operation != operation {
+			continue
+		}
+		if spec.FileOperation != fileOperation {
+			continue
+		}
+		d, ok := spec.Device.(*types.VirtualDisk)
+		if !ok {
+			continue
+		}
+		disks = append(disks, d)
+	}
+	return disks
+}
+
+func resourceVSphereVirtualMachineVmPodConfigForPlacementAppendNewDisks(
+	configs []types.VmPodConfigForPlacement,
+	d structure.ResourceIDStringer,
+	spec types.VirtualMachineConfigSpec,
+	pod *object.StoragePod,
+) []types.VmPodConfigForPlacement {
+	for _, disk := range resourceVSphereVirtualMachineStoragePodDiskFilter(
+		spec.DeviceChange,
+		types.VirtualDeviceConfigSpecOperationAdd,
+		types.VirtualDeviceConfigSpecFileOperationCreate,
+	) {
+		log.Printf(
+			"[DEBUG] %s: Requesting recommendation for new disk %q on datastore cluster %q",
+			resourceVSphereVirtualMachineIDString(d),
+			object.VirtualDeviceList{}.Name(disk),
+			pod.InventoryPath,
+		)
+		config := types.VmPodConfigForPlacement{
+			StoragePod: pod.Reference(),
+			Disk: []types.PodDiskLocator{
+				{
+					DiskId:          disk.Key,
+					DiskBackingInfo: disk.Backing,
+				},
+			},
+		}
+		configs = append(configs, config)
+	}
+	return configs
+}
+
+func resourceVSphereVirtualMachineApplySDRSRecommendationsToConfigSpec(
+	d structure.ResourceIDStringer,
+	client *govmomi.Client,
+	recommendations []types.ClusterRecommendation,
+	spec types.VirtualMachineConfigSpec,
+) (types.VirtualMachineConfigSpec, error) {
+	// Our target datastores for each individual disk reside in various locations
+	// in the cluster recommendations. We use the relocate spec - we need to
+	// search the relocate specs in all actions for various things.
+	for _, action := range recommendations[0].Action {
+		spa, ok := action.(*types.StoragePlacementAction)
+		if !ok {
+			continue
+		}
+		if len(spa.RelocateSpec.Disk) < 1 {
+			// This is the recommendation for the VM configuration. Place the VMX
+			// file here. This should only happen when we are creating virtual
+			// machines.
+			var err error
+			spec, err = resourceVSphereVirtualMachineCreateBarePopulateVmxDatastore(d, client, spec, spa.Destination.Value)
+			if err != nil {
+				return spec, err
+			}
+		}
+		for _, disk := range spa.RelocateSpec.Disk {
+			for _, dc := range spec.DeviceChange {
+				vdcs := dc.GetVirtualDeviceConfigSpec()
+				destDisk, ok := vdcs.Device.(*types.VirtualDisk)
+				if !ok {
+					continue
+				}
+				if destDisk.Key == disk.DiskId {
+					// This is our disk. Populate the backing file datastore with the
+					// datastore ID from this entry in the relocate spec.
+					ds, err := datastore.FromID(client, disk.Datastore.Value)
+					if err != nil {
+						return spec, fmt.Errorf(
+							"error locating recommended datastore %q for disk %q: %s",
+							disk.Datastore.Value,
+							object.VirtualDeviceList{}.Name(destDisk),
+							err,
+						)
+					}
+
+					log.Printf(
+						"[DEBUG] %s: Assigning recommended datastore %q to disk %q",
+						resourceVSphereVirtualMachineIDString(d),
+						ds.Name(),
+						object.VirtualDeviceList{}.Name(destDisk),
+					)
+					destDisk.Backing.(*types.VirtualDiskFlatVer2BackingInfo).FileName = fmt.Sprintf("[%s]", ds.Name())
+				}
+			}
+		}
+	}
+	return spec, nil
 }
