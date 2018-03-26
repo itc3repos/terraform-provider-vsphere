@@ -146,25 +146,33 @@ func validateCloneSnapshots(props *mo.VirtualMachine) error {
 // The clone spec built by this function for the clone contains the target
 // datastore, the source snapshot in the event of linked clones, and a relocate
 // spec that contains the new locations and configuration details of the new
-// virtual disks.
-func ExpandVirtualMachineCloneSpec(d *schema.ResourceData, c *govmomi.Client) (types.VirtualMachineCloneSpec, *object.VirtualMachine, error) {
+// virtual disks. The exception to this is when storage DRS is necessary, in
+// which case datastores will be empty and will be populated by the storage DRS
+// transformation operation outside the scope of this function.
+func ExpandVirtualMachineCloneSpec(
+	d *schema.ResourceData,
+	c *govmomi.Client,
+) (types.VirtualMachineCloneSpec, *object.VirtualMachine, object.VirtualDeviceList, error) {
 	var spec types.VirtualMachineCloneSpec
 	log.Printf("[DEBUG] ExpandVirtualMachineCloneSpec: Preparing clone spec for VM")
-	ds, err := datastore.FromID(c, d.Get("datastore_id").(string))
-	if err != nil {
-		return spec, nil, fmt.Errorf("error locating datastore for VM: %s", err)
+	dsID := d.Get("datastore_id").(string)
+	if dsID != "" {
+		ds, err := datastore.FromID(c, d.Get("datastore_id").(string))
+		if err != nil {
+			return spec, nil, nil, fmt.Errorf("error locating datastore for VM: %s", err)
+		}
+		dsRef := ds.Reference()
+		spec.Location.Datastore = &dsRef
 	}
-	dsRef := ds.Reference()
-	spec.Location.Datastore = &dsRef
 	tUUID := d.Get("clone.0.template_uuid").(string)
 	log.Printf("[DEBUG] ExpandVirtualMachineCloneSpec: Cloning from UUID: %s", tUUID)
 	vm, err := virtualmachine.FromUUID(c, tUUID)
 	if err != nil {
-		return spec, nil, fmt.Errorf("cannot locate virtual machine or template with UUID %q: %s", tUUID, err)
+		return spec, nil, nil, fmt.Errorf("cannot locate virtual machine or template with UUID %q: %s", tUUID, err)
 	}
 	vprops, err := virtualmachine.Properties(vm)
 	if err != nil {
-		return spec, nil, fmt.Errorf("error fetching virtual machine or template properties: %s", err)
+		return spec, nil, nil, fmt.Errorf("error fetching virtual machine or template properties: %s", err)
 	}
 	// If we are creating a linked clone, grab the current snapshot of the
 	// source, and populate the appropriate field. This should have already been
@@ -173,7 +181,7 @@ func ExpandVirtualMachineCloneSpec(d *schema.ResourceData, c *govmomi.Client) (t
 		log.Printf("[DEBUG] ExpandVirtualMachineCloneSpec: Clone type is a linked clone")
 		log.Printf("[DEBUG] ExpandVirtualMachineCloneSpec: Fetching snapshot for VM/template UUID %s", tUUID)
 		if err := validateCloneSnapshots(vprops); err != nil {
-			return spec, nil, err
+			return spec, nil, nil, err
 		}
 		spec.Snapshot = vprops.Snapshot.CurrentSnapshot
 		spec.Location.DiskMoveType = string(types.VirtualMachineRelocateDiskMoveOptionsCreateNewChildDiskBacking)
@@ -184,19 +192,19 @@ func ExpandVirtualMachineCloneSpec(d *schema.ResourceData, c *govmomi.Client) (t
 	poolID := d.Get("resource_pool_id").(string)
 	pool, err := resourcepool.FromID(c, poolID)
 	if err != nil {
-		return spec, nil, fmt.Errorf("could not find resource pool ID %q: %s", poolID, err)
+		return spec, nil, nil, fmt.Errorf("could not find resource pool ID %q: %s", poolID, err)
 	}
 	var hs *object.HostSystem
 	if v, ok := d.GetOk("host_system_id"); ok {
 		hsID := v.(string)
 		var err error
 		if hs, err = hostsystem.FromID(c, hsID); err != nil {
-			return spec, nil, fmt.Errorf("error locating host system at ID %q: %s", hsID, err)
+			return spec, nil, nil, fmt.Errorf("error locating host system at ID %q: %s", hsID, err)
 		}
 	}
 	// Validate that the host is part of the resource pool before proceeding
 	if err := resourcepool.ValidateHost(c, pool, hs); err != nil {
-		return spec, nil, err
+		return spec, nil, nil, err
 	}
 	poolRef := pool.Reference()
 	spec.Location.Pool = &poolRef
@@ -209,9 +217,9 @@ func ExpandVirtualMachineCloneSpec(d *schema.ResourceData, c *govmomi.Client) (t
 	l := object.VirtualDeviceList(vprops.Config.Hardware.Device)
 	relocators, err := virtualdevice.DiskCloneRelocateOperation(d, c, l)
 	if err != nil {
-		return spec, nil, err
+		return spec, nil, nil, err
 	}
 	spec.Location.Disk = relocators
 	log.Printf("[DEBUG] ExpandVirtualMachineCloneSpec: Clone spec prep complete")
-	return spec, vm, nil
+	return spec, vm, l, nil
 }

@@ -1,7 +1,6 @@
 package vsphere
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"log"
@@ -12,9 +11,7 @@ import (
 	"github.com/terraform-providers/terraform-provider-vsphere/vsphere/internal/helper/datastore"
 	"github.com/terraform-providers/terraform-provider-vsphere/vsphere/internal/helper/folder"
 	"github.com/terraform-providers/terraform-provider-vsphere/vsphere/internal/helper/hostsystem"
-	"github.com/terraform-providers/terraform-provider-vsphere/vsphere/internal/helper/provider"
 	"github.com/terraform-providers/terraform-provider-vsphere/vsphere/internal/helper/resourcepool"
-	"github.com/terraform-providers/terraform-provider-vsphere/vsphere/internal/helper/storagepod"
 	"github.com/terraform-providers/terraform-provider-vsphere/vsphere/internal/helper/structure"
 	"github.com/terraform-providers/terraform-provider-vsphere/vsphere/internal/helper/viapi"
 	"github.com/terraform-providers/terraform-provider-vsphere/vsphere/internal/helper/virtualmachine"
@@ -211,7 +208,7 @@ func resourceVSphereVirtualMachine() *schema.Resource {
 }
 
 func resourceVSphereVirtualMachineCreate(d *schema.ResourceData, meta interface{}) error {
-	log.Printf("[DEBUG] %s: Beginning create", resourceVSphereVirtualMachineIDString(d))
+	log.Printf("[DEBUG] %s: Beginning create", vmworkflow.ResourceIDString(d))
 	client := meta.(*VSphereClient).vimClient
 	tagsClient, err := tagsClientIfDefined(d, meta)
 	if err != nil {
@@ -259,18 +256,18 @@ func resourceVSphereVirtualMachineCreate(d *schema.ResourceData, meta interface{
 	}
 
 	// All done!
-	log.Printf("[DEBUG] %s: Create complete", resourceVSphereVirtualMachineIDString(d))
+	log.Printf("[DEBUG] %s: Create complete", vmworkflow.ResourceIDString(d))
 	return resourceVSphereVirtualMachineRead(d, meta)
 }
 
 func resourceVSphereVirtualMachineRead(d *schema.ResourceData, meta interface{}) error {
-	log.Printf("[DEBUG] %s: Reading state of virtual machine", resourceVSphereVirtualMachineIDString(d))
+	log.Printf("[DEBUG] %s: Reading state of virtual machine", vmworkflow.ResourceIDString(d))
 	client := meta.(*VSphereClient).vimClient
 	id := d.Id()
 	vm, err := virtualmachine.FromUUID(client, id)
 	if err != nil {
 		if _, ok := err.(*virtualmachine.UUIDNotFoundError); ok {
-			log.Printf("[DEBUG] %s: Virtual machine not found, marking resource as gone: %s", resourceVSphereVirtualMachineIDString(d), err)
+			log.Printf("[DEBUG] %s: Virtual machine not found, marking resource as gone: %s", vmworkflow.ResourceIDString(d), err)
 			d.SetId("")
 			return nil
 		}
@@ -383,12 +380,12 @@ func resourceVSphereVirtualMachineRead(d *schema.ResourceData, meta interface{})
 		}
 	}
 
-	log.Printf("[DEBUG] %s: Read complete", resourceVSphereVirtualMachineIDString(d))
+	log.Printf("[DEBUG] %s: Read complete", vmworkflow.ResourceIDString(d))
 	return nil
 }
 
 func resourceVSphereVirtualMachineUpdate(d *schema.ResourceData, meta interface{}) error {
-	log.Printf("[DEBUG] %s: Performing update", resourceVSphereVirtualMachineIDString(d))
+	log.Printf("[DEBUG] %s: Performing update", vmworkflow.ResourceIDString(d))
 	client := meta.(*VSphereClient).vimClient
 	tagsClient, err := tagsClientIfDefined(d, meta)
 	if err != nil {
@@ -442,10 +439,11 @@ func resourceVSphereVirtualMachineUpdate(d *schema.ResourceData, meta interface{
 		return fmt.Errorf("error in virtual machine configuration: %s", err)
 	}
 
-	devices := object.VirtualDeviceList(vprops.Config.Hardware.Device)
-	if spec.DeviceChange, err = applyVirtualDevices(d, client, devices); err != nil {
+	processor, err := processDevices(d, client, vprops.Config.Hardware.Device)
+	if err != nil {
 		return err
 	}
+	spec.DeviceChange = processor.Changes()
 	// Only carry out the reconfigure if we actually have a change to process.
 	if changed || len(spec.DeviceChange) > 0 {
 		//Check to see if we need to shutdown the VM for this process.
@@ -488,12 +486,12 @@ func resourceVSphereVirtualMachineUpdate(d *schema.ResourceData, meta interface{
 	}
 
 	// All done with updates.
-	log.Printf("[DEBUG] %s: Update complete", resourceVSphereVirtualMachineIDString(d))
+	log.Printf("[DEBUG] %s: Update complete", vmworkflow.ResourceIDString(d))
 	return resourceVSphereVirtualMachineRead(d, meta)
 }
 
 func resourceVSphereVirtualMachineDelete(d *schema.ResourceData, meta interface{}) error {
-	log.Printf("[DEBUG] %s: Performing delete", resourceVSphereVirtualMachineIDString(d))
+	log.Printf("[DEBUG] %s: Performing delete", vmworkflow.ResourceIDString(d))
 	client := meta.(*VSphereClient).vimClient
 	id := d.Id()
 	vm, err := virtualmachine.FromUUID(client, id)
@@ -531,12 +529,12 @@ func resourceVSphereVirtualMachineDelete(d *schema.ResourceData, meta interface{
 	if err := virtualmachine.Destroy(vm); err != nil {
 		return fmt.Errorf("error destroying virtual machine: %s", err)
 	}
-	log.Printf("[DEBUG] %s: Delete complete", resourceVSphereVirtualMachineIDString(d))
+	log.Printf("[DEBUG] %s: Delete complete", vmworkflow.ResourceIDString(d))
 	return nil
 }
 
 func resourceVSphereVirtualMachineCustomizeDiff(d *schema.ResourceDiff, meta interface{}) error {
-	log.Printf("[DEBUG] %s: Performing diff customization and validation", resourceVSphereVirtualMachineIDString(d))
+	log.Printf("[DEBUG] %s: Performing diff customization and validation", vmworkflow.ResourceIDString(d))
 	client := meta.(*VSphereClient).vimClient
 
 	// Block certain options from being set depending on the vSphere version.
@@ -573,7 +571,7 @@ func resourceVSphereVirtualMachineCustomizeDiff(d *schema.ResourceDiff, meta int
 			return errors.New("this resource was imported or migrated from a previous version and does not support cloning. Please remove the \"clone\" block from its configuration")
 		}
 	}
-	log.Printf("[DEBUG] %s: Diff customization and validation complete", resourceVSphereVirtualMachineIDString(d))
+	log.Printf("[DEBUG] %s: Diff customization and validation complete", vmworkflow.ResourceIDString(d))
 	return nil
 }
 
@@ -643,14 +641,14 @@ func resourceVSphereVirtualMachineImport(d *schema.ResourceData, meta interface{
 	d.Set("shutdown_wait_timeout", rs["shutdown_wait_timeout"].Default)
 	d.Set("wait_for_guest_net_timeout", rs["wait_for_guest_net_timeout"].Default)
 
-	log.Printf("[DEBUG] %s: Import complete, resource is ready for read", resourceVSphereVirtualMachineIDString(d))
+	log.Printf("[DEBUG] %s: Import complete, resource is ready for read", vmworkflow.ResourceIDString(d))
 	return []*schema.ResourceData{d}, nil
 }
 
 // resourceVSphereVirtualMachineCreateBare contains the "bare metal" VM
 // deploy path. The VM is returned.
 func resourceVSphereVirtualMachineCreateBare(d *schema.ResourceData, meta interface{}) (*object.VirtualMachine, error) {
-	log.Printf("[DEBUG] %s: VM being created from scratch", resourceVSphereVirtualMachineIDString(d))
+	log.Printf("[DEBUG] %s: VM being created from scratch", vmworkflow.ResourceIDString(d))
 	client := meta.(*VSphereClient).vimClient
 	poolID := d.Get("resource_pool_id").(string)
 	pool, err := resourcepool.FromID(client, poolID)
@@ -696,21 +694,23 @@ func resourceVSphereVirtualMachineCreateBare(d *schema.ResourceData, meta interf
 	}
 	log.Printf("[DEBUG] Default devices: %s", virtualdevice.DeviceListString(devices))
 
-	if spec.DeviceChange, err = applyVirtualDevices(d, client, devices); err != nil {
+	processor, err := processDevices(d, client, devices)
+	if err != nil {
 		return nil, err
 	}
+	spec.DeviceChange = processor.Changes()
 
 	if _, ok := d.GetOk("datastore_cluster_id"); ok {
 		// We've selected a datastore cluster here instead of individual
 		// datastores. And our spec is still incomplete as our
 		// disk backings will be missing from the spec. Populate those now.
-		if spec, err = resourceVSphereVirtualMachineCreateBarePopulateStoragePod(d, client, spec, pool); err != nil {
+		if spec, err = vmworkflow.SDRSTransformVirtualMachineConfigSpecForCreate(d, client, spec, pool); err != nil {
 			return nil, err
 		}
 	} else {
 		// We have a static datastore and our spec should be largely complete, save
 		// the datastore for the virtual machine config. Save this now.
-		if spec, err = resourceVSphereVirtualMachineCreateBarePopulateVmxDatastore(
+		if spec, err = vmworkflow.PopulateVmxDatastore(
 			d,
 			client,
 			spec,
@@ -744,7 +744,7 @@ func resourceVSphereVirtualMachineCreateBare(d *schema.ResourceData, meta interf
 // resourceVSphereVirtualMachineCreateClone contains the clone VM deploy
 // path. The VM is returned.
 func resourceVSphereVirtualMachineCreateClone(d *schema.ResourceData, meta interface{}) (*object.VirtualMachine, error) {
-	log.Printf("[DEBUG] %s: VM being created from clone", resourceVSphereVirtualMachineIDString(d))
+	log.Printf("[DEBUG] %s: VM being created from clone", vmworkflow.ResourceIDString(d))
 	client := meta.(*VSphereClient).vimClient
 
 	// Find the folder based off the path to the resource pool. Basically what we
@@ -762,9 +762,48 @@ func resourceVSphereVirtualMachineCreateClone(d *schema.ResourceData, meta inter
 	}
 
 	// Expand the clone spec. We get the source VM here too.
-	cloneSpec, srcVM, err := vmworkflow.ExpandVirtualMachineCloneSpec(d, client)
+	cloneSpec, srcVM, srcDevices, err := vmworkflow.ExpandVirtualMachineCloneSpec(d, client)
 	if err != nil {
 		return nil, err
+	}
+
+	if _, ok := d.GetOk("datastore_cluster_id"); ok {
+		// We've selected a datastore cluster here instead of individual
+		// datastores. And our spec is still incomplete as our
+		// disk backings will be missing from the spec. Populate those now.
+		//
+		// This is currently a very ugly operation that requires expanding the VM
+		// config spec so that we can get the new device list. Hopefully this can
+		// be re-factored.
+		var newSpec types.VirtualMachineConfigSpec
+		var devices object.VirtualDeviceList
+		var processor *virtualDeviceProcessor
+		newSpec, err = expandVirtualMachineConfigSpec(d, client)
+		if err != nil {
+			return nil, fmt.Errorf("error in virtual machine configuration: %s", err)
+		}
+		devices, err = resourcepool.DefaultDevices(client, pool, d.Get("guest_id").(string))
+		if err != nil {
+			return nil, fmt.Errorf("error loading default device list: %s", err)
+		}
+		log.Printf("[DEBUG] Default devices: %s", virtualdevice.DeviceListString(devices))
+
+		processor, err = processDevices(d, client, devices)
+		if err != nil {
+			return nil, err
+		}
+		newDevices := processor.Devices()
+		if cloneSpec, err = vmworkflow.SDRSTransformVirtualMachineCloneSpec(
+			d,
+			client,
+			newSpec,
+			cloneSpec,
+			pool,
+			newDevices,
+			srcDevices,
+		); err != nil {
+			return nil, err
+		}
 	}
 
 	// Start the clone
@@ -822,8 +861,8 @@ func resourceVSphereVirtualMachineCreateClone(d *schema.ResourceData, meta inter
 		return nil, err
 	}
 	cfgSpec.DeviceChange = virtualdevice.AppendDeviceChangeSpec(cfgSpec.DeviceChange, delta...)
-	log.Printf("[DEBUG] %s: Final device list: %s", resourceVSphereVirtualMachineIDString(d), virtualdevice.DeviceListString(devices))
-	log.Printf("[DEBUG] %s: Final device change cfgSpec: %s", resourceVSphereVirtualMachineIDString(d), virtualdevice.DeviceChangeString(cfgSpec.DeviceChange))
+	log.Printf("[DEBUG] %s: Final device list: %s", vmworkflow.ResourceIDString(d), virtualdevice.DeviceListString(devices))
+	log.Printf("[DEBUG] %s: Final device change cfgSpec: %s", vmworkflow.ResourceIDString(d), virtualdevice.DeviceChangeString(cfgSpec.DeviceChange))
 
 	// Perform updates
 	if err := virtualmachine.Reconfigure(vm, cfgSpec); err != nil {
@@ -855,7 +894,7 @@ func resourceVSphereVirtualMachineCreateClone(d *schema.ResourceData, meta inter
 	}
 	// If we customized, wait on customization.
 	if cw != nil {
-		log.Printf("[DEBUG] %s: Waiting for VM customization to complete", resourceVSphereVirtualMachineIDString(d))
+		log.Printf("[DEBUG] %s: Waiting for VM customization to complete", vmworkflow.ResourceIDString(d))
 		<-cw.Done()
 		if err := cw.Err(); err != nil {
 			return nil, fmt.Errorf(formatVirtualMachineCustomizationWaitError, vm.InventoryPath, err)
@@ -897,7 +936,7 @@ func resourceVSphereVirtualMachineRollbackCreate(
 // This function is responsible for building the top-level relocate spec. For
 // disks, we call out to relocate functionality in the disk sub-resource.
 func resourceVSphereVirtualMachineUpdateLocation(d *schema.ResourceData, meta interface{}) error {
-	log.Printf("[DEBUG] %s: Checking for pending migration operations", resourceVSphereVirtualMachineIDString(d))
+	log.Printf("[DEBUG] %s: Checking for pending migration operations", vmworkflow.ResourceIDString(d))
 	client := meta.(*VSphereClient).vimClient
 
 	// A little bit of duplication of VM object data is done here to keep the
@@ -920,10 +959,10 @@ func resourceVSphereVirtualMachineUpdateLocation(d *schema.ResourceData, meta in
 	}
 	// If we don't have any changes, stop here.
 	if !d.HasChange("resource_pool_id") && !d.HasChange("host_system_id") && !d.HasChange("datastore_id") && len(relocators) < 1 {
-		log.Printf("[DEBUG] %s: No migration operations found", resourceVSphereVirtualMachineIDString(d))
+		log.Printf("[DEBUG] %s: No migration operations found", vmworkflow.ResourceIDString(d))
 		return nil
 	}
-	log.Printf("[DEBUG] %s: Migration operations found, proceeding with migration", resourceVSphereVirtualMachineIDString(d))
+	log.Printf("[DEBUG] %s: Migration operations found, proceeding with migration", vmworkflow.ResourceIDString(d))
 
 	// Fetch and validate pool and host
 	poolID := d.Get("resource_pool_id").(string)
@@ -967,271 +1006,85 @@ func resourceVSphereVirtualMachineUpdateLocation(d *schema.ResourceData, meta in
 	return virtualmachine.Relocate(vm, spec, d.Get("migrate_wait_timeout").(int))
 }
 
-// applyVirtualDevices is used by Create and Update to build a list of virtual
-// device changes.
-func applyVirtualDevices(d *schema.ResourceData, c *govmomi.Client, l object.VirtualDeviceList) ([]types.BaseVirtualDeviceConfigSpec, error) {
+// virtualDeviceProcessor is a small helper object that is used by Create,
+// Update, and SDRS operations to get a list of device change operations and a
+// final device list at the end of any apply operations that may happen during
+// a specific operation.
+type virtualDeviceProcessor struct {
+	rd     *schema.ResourceData
+	client *govmomi.Client
+
+	// Changes in-flight
+	devices object.VirtualDeviceList
+
+	// Finished product
+	changes []types.BaseVirtualDeviceConfigSpec
+}
+
+func processDevices(d *schema.ResourceData, c *govmomi.Client, initial object.VirtualDeviceList) (*virtualDeviceProcessor, error) {
+	p := &virtualDeviceProcessor{
+		rd:      d,
+		client:  c,
+		devices: initial,
+	}
+	if err := p.applyVirtualDevices(); err != nil {
+		return nil, err
+	}
+	return p, nil
+}
+
+func (p *virtualDeviceProcessor) Changes() []types.BaseVirtualDeviceConfigSpec {
+	return p.changes
+}
+
+func (p *virtualDeviceProcessor) Devices() object.VirtualDeviceList {
+	return p.devices
+}
+
+// applyVirtualDevices is the internal workhorse of the virtualDeviceProcessor.
+func (p *virtualDeviceProcessor) applyVirtualDevices() error {
 	// We filter this device list through each major device class' apply
 	// operation. This will give us a final set of changes that will be our
 	// deviceChange attribute.
-	var spec, delta []types.BaseVirtualDeviceConfigSpec
+	var delta []types.BaseVirtualDeviceConfigSpec
 	var err error
 	// First check the state of our SCSI bus. Normalize it if we need to.
-	l, delta, err = virtualdevice.NormalizeSCSIBus(l, d.Get("scsi_type").(string), d.Get("scsi_controller_count").(int))
+	p.devices, delta, err = virtualdevice.NormalizeSCSIBus(
+		p.devices,
+		p.rd.Get("scsi_type").(string),
+		p.rd.Get("scsi_controller_count").(int),
+	)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	if len(delta) > 0 {
-		log.Printf("[DEBUG] %s: SCSI bus has changed and requires a VM restart", resourceVSphereVirtualMachineIDString(d))
-		d.Set("reboot_required", true)
+		log.Printf("[DEBUG] %s: SCSI bus has changed and requires a VM restart", vmworkflow.ResourceIDString(p.rd))
+		p.rd.Set("reboot_required", true)
 	}
-	spec = virtualdevice.AppendDeviceChangeSpec(spec, delta...)
+	p.changes = virtualdevice.AppendDeviceChangeSpec(p.changes, delta...)
 	// Disks
-	l, delta, err = virtualdevice.DiskApplyOperation(d, c, l)
+	p.devices, delta, err = virtualdevice.DiskApplyOperation(p.rd, p.client, p.devices)
 	if err != nil {
-		return nil, err
+		return err
 	}
-	spec = virtualdevice.AppendDeviceChangeSpec(spec, delta...)
+	p.changes = virtualdevice.AppendDeviceChangeSpec(p.changes, delta...)
 	// Network devices
-	l, delta, err = virtualdevice.NetworkInterfaceApplyOperation(d, c, l)
+	p.devices, delta, err = virtualdevice.NetworkInterfaceApplyOperation(p.rd, p.client, p.devices)
 	if err != nil {
-		return nil, err
+		return err
 	}
-	spec = virtualdevice.AppendDeviceChangeSpec(spec, delta...)
+	p.changes = virtualdevice.AppendDeviceChangeSpec(p.changes, delta...)
 	// CDROM
-	l, delta, err = virtualdevice.CdromApplyOperation(d, c, l)
+	p.devices, delta, err = virtualdevice.CdromApplyOperation(p.rd, p.client, p.devices)
 	if err != nil {
-		return nil, err
+		return err
 	}
-	spec = virtualdevice.AppendDeviceChangeSpec(spec, delta...)
-	log.Printf("[DEBUG] %s: Final device list: %s", resourceVSphereVirtualMachineIDString(d), virtualdevice.DeviceListString(l))
-	log.Printf("[DEBUG] %s: Final device change spec: %s", resourceVSphereVirtualMachineIDString(d), virtualdevice.DeviceChangeString(spec))
-	return spec, nil
-}
-
-// resourceVSphereVirtualMachineIDString prints a friendly string for the
-// vsphere_virtual_machine resource.
-func resourceVSphereVirtualMachineIDString(d structure.ResourceIDStringer) string {
-	return structure.ResourceIDString(d, "vsphere_virtual_machine")
-}
-
-// resourceVSphereVirtualMachineCreateBarePopulateStoragePod performs storage
-// DRS transformations to a VirtualMachineConfigSpec for the "bare metal", or
-// from scratch, VM creation path. This is accomplished by doing a storage DRS
-// recommendation against the datastore cluster specified, with the
-// recommendations from the operation applied to the config spec directly. The
-// recommendations themselves are dropped after the fact and left to expire.
-func resourceVSphereVirtualMachineCreateBarePopulateStoragePod(
-	d *schema.ResourceData,
-	client *govmomi.Client,
-	spec types.VirtualMachineConfigSpec,
-	pool *object.ResourcePool,
-) (types.VirtualMachineConfigSpec, error) {
-	if err := viapi.ValidateVirtualCenter(client); err != nil {
-		return spec, errors.New("assignment of a virtual machine to a datastore cluster requires vCenter")
-	}
-
-	log.Printf("[DEBUG] %s: Getting storage DRS recommendations for VM creation", resourceVSphereVirtualMachineIDString(d))
-
-	pod, err := storagepod.FromID(client, d.Get("datastore_cluster_id").(string))
-	if err != nil {
-		return spec, fmt.Errorf("error locating datastore cluster for initial VM placement: %s", err)
-	}
-	sps := resourceVSphereVirtualMachineStoragePlacementSpecForCreate(d, spec, pool, pod)
-	srm := object.NewStorageResourceManager(client.Client)
-	ctx, cancel := context.WithTimeout(context.Background(), provider.DefaultAPITimeout)
-	defer cancel()
-	result, err := srm.RecommendDatastores(ctx, sps)
-	if err != nil {
-		return spec, fmt.Errorf("error getting storage DRS recommendations: %s", err)
-	}
-
-	if len(result.Recommendations) < 1 {
-		return spec, errors.New("no storage DRS recommendations were returned. Please check your datastore cluster settings and try again")
-	}
-
-	spec, err = resourceVSphereVirtualMachineApplySDRSRecommendationsToConfigSpec(d, client, result.Recommendations, spec)
-	if err != nil {
-		return spec, fmt.Errorf("error applying SDRS recommendations to config spec: %s", err)
-	}
-
-	log.Printf("[DEBUG] %s: Storage DRS recommendations applied successfully", resourceVSphereVirtualMachineIDString(d))
-	return spec, nil
-}
-
-// resourceVSphereVirtualMachineCreateBarePopulateVmxDatastore populates the
-// datastore for the virtual machine configuration during the creation stage of
-// a virtual machine.
-func resourceVSphereVirtualMachineCreateBarePopulateVmxDatastore(
-	d structure.ResourceIDStringer,
-	client *govmomi.Client,
-	spec types.VirtualMachineConfigSpec,
-	id string,
-) (types.VirtualMachineConfigSpec, error) {
-	ds, err := datastore.FromID(client, id)
-	if err != nil {
-		return spec, fmt.Errorf("error locating datastore for VM configuration: %s", err)
-	}
-
-	log.Printf("[DEBUG] %s: Datastore for VMX configuration is %q", resourceVSphereVirtualMachineIDString(d), ds.Name())
-	spec.Files = &types.VirtualMachineFileInfo{
-		VmPathName: fmt.Sprintf("[%s]", ds.Name()),
-	}
-
-	return spec, nil
-}
-
-func resourceVSphereVirtualMachineStoragePlacementSpecForCreate(
-	d *schema.ResourceData,
-	spec types.VirtualMachineConfigSpec,
-	pool *object.ResourcePool,
-	pod *object.StoragePod,
-) types.StoragePlacementSpec {
-	log.Printf("[DEBUG] %s: Creating StoragePodPlacementSpec for creation", resourceVSphereVirtualMachineIDString(d))
-
-	pr := pool.Reference()
-	sps := types.StoragePlacementSpec{
-		Type:         string(types.StoragePlacementSpecPlacementTypeCreate),
-		ResourcePool: &pr,
-		ConfigSpec:   &spec,
-	}
-	sps.PodSelectionSpec = resourceVSphereVirtualMachineStorageDrsPodSelectionSpecForCreate(d, spec, pod)
-
-	return sps
-}
-
-func resourceVSphereVirtualMachineStorageDrsPodSelectionSpecForCreate(
-	d structure.ResourceIDStringer,
-	spec types.VirtualMachineConfigSpec,
-	pod *object.StoragePod,
-) types.StorageDrsPodSelectionSpec {
-	log.Printf("[DEBUG] %s: Creating StorageDrsPodSelectionSpec for creation", resourceVSphereVirtualMachineIDString(d))
-
-	pr := pod.Reference()
-	pss := types.StorageDrsPodSelectionSpec{
-		StoragePod: &pr,
-	}
-	pss.InitialVmConfig = resourceVSphereVirtualMachineVmPodConfigForPlacementForCreate(d, spec, pod)
-
-	return pss
-}
-
-func resourceVSphereVirtualMachineVmPodConfigForPlacementForCreate(
-	d structure.ResourceIDStringer,
-	spec types.VirtualMachineConfigSpec,
-	pod *object.StoragePod,
-) []types.VmPodConfigForPlacement {
-	log.Printf("[DEBUG] %s: Creating VmPodConfigForPlacement for creation", resourceVSphereVirtualMachineIDString(d))
-	return resourceVSphereVirtualMachineVmPodConfigForPlacementAppendNewDisks(nil, d, spec, pod)
-}
-
-func resourceVSphereVirtualMachineStoragePodDiskFilter(
-	deviceChange []types.BaseVirtualDeviceConfigSpec,
-	operation types.VirtualDeviceConfigSpecOperation,
-	fileOperation types.VirtualDeviceConfigSpecFileOperation,
-) []*types.VirtualDisk {
-	var disks []*types.VirtualDisk
-	for _, dc := range deviceChange {
-		spec := dc.GetVirtualDeviceConfigSpec()
-		if spec.Operation != operation {
-			continue
-		}
-		if spec.FileOperation != fileOperation {
-			continue
-		}
-		d, ok := spec.Device.(*types.VirtualDisk)
-		if !ok {
-			continue
-		}
-		disks = append(disks, d)
-	}
-	return disks
-}
-
-func resourceVSphereVirtualMachineVmPodConfigForPlacementAppendNewDisks(
-	configs []types.VmPodConfigForPlacement,
-	d structure.ResourceIDStringer,
-	spec types.VirtualMachineConfigSpec,
-	pod *object.StoragePod,
-) []types.VmPodConfigForPlacement {
-	for _, disk := range resourceVSphereVirtualMachineStoragePodDiskFilter(
-		spec.DeviceChange,
-		types.VirtualDeviceConfigSpecOperationAdd,
-		types.VirtualDeviceConfigSpecFileOperationCreate,
-	) {
-		log.Printf(
-			"[DEBUG] %s: Requesting recommendation for new disk %q on datastore cluster %q",
-			resourceVSphereVirtualMachineIDString(d),
-			object.VirtualDeviceList{}.Name(disk),
-			pod.InventoryPath,
-		)
-		config := types.VmPodConfigForPlacement{
-			StoragePod: pod.Reference(),
-			Disk: []types.PodDiskLocator{
-				{
-					DiskId:          disk.Key,
-					DiskBackingInfo: disk.Backing,
-				},
-			},
-		}
-		configs = append(configs, config)
-	}
-	return configs
-}
-
-func resourceVSphereVirtualMachineApplySDRSRecommendationsToConfigSpec(
-	d structure.ResourceIDStringer,
-	client *govmomi.Client,
-	recommendations []types.ClusterRecommendation,
-	spec types.VirtualMachineConfigSpec,
-) (types.VirtualMachineConfigSpec, error) {
-	// Our target datastores for each individual disk reside in various locations
-	// in the cluster recommendations. We use the relocate spec - we need to
-	// search the relocate specs in all actions for various things.
-	for _, action := range recommendations[0].Action {
-		spa, ok := action.(*types.StoragePlacementAction)
-		if !ok {
-			continue
-		}
-		if len(spa.RelocateSpec.Disk) < 1 {
-			// This is the recommendation for the VM configuration. Place the VMX
-			// file here. This should only happen when we are creating virtual
-			// machines.
-			var err error
-			spec, err = resourceVSphereVirtualMachineCreateBarePopulateVmxDatastore(d, client, spec, spa.Destination.Value)
-			if err != nil {
-				return spec, err
-			}
-		}
-		for _, disk := range spa.RelocateSpec.Disk {
-			for _, dc := range spec.DeviceChange {
-				vdcs := dc.GetVirtualDeviceConfigSpec()
-				destDisk, ok := vdcs.Device.(*types.VirtualDisk)
-				if !ok {
-					continue
-				}
-				if destDisk.Key == disk.DiskId {
-					// This is our disk. Populate the backing file datastore with the
-					// datastore ID from this entry in the relocate spec.
-					ds, err := datastore.FromID(client, disk.Datastore.Value)
-					if err != nil {
-						return spec, fmt.Errorf(
-							"error locating recommended datastore %q for disk %q: %s",
-							disk.Datastore.Value,
-							object.VirtualDeviceList{}.Name(destDisk),
-							err,
-						)
-					}
-
-					log.Printf(
-						"[DEBUG] %s: Assigning recommended datastore %q to disk %q",
-						resourceVSphereVirtualMachineIDString(d),
-						ds.Name(),
-						object.VirtualDeviceList{}.Name(destDisk),
-					)
-					destDisk.Backing.(*types.VirtualDiskFlatVer2BackingInfo).FileName = fmt.Sprintf("[%s]", ds.Name())
-				}
-			}
-		}
-	}
-	return spec, nil
+	p.changes = virtualdevice.AppendDeviceChangeSpec(p.changes, delta...)
+	log.Printf("[DEBUG] %s: Final device list: %s", vmworkflow.ResourceIDString(p.rd), virtualdevice.DeviceListString(p.devices))
+	log.Printf(
+		"[DEBUG] %s: Final device change spec: %s",
+		vmworkflow.ResourceIDString(p.rd),
+		virtualdevice.DeviceChangeString(p.changes),
+	)
+	return nil
 }

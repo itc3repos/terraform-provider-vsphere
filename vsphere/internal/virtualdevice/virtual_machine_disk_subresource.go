@@ -683,16 +683,9 @@ nextNew:
 // existing state.
 func DiskCloneValidateOperation(d *schema.ResourceDiff, c *govmomi.Client, l object.VirtualDeviceList, linked bool) error {
 	log.Printf("[DEBUG] DiskCloneValidateOperation: Checking existing virtual disk configuration")
-	devices := SelectDisks(l, d.Get("scsi_controller_count").(int))
-	// Sort the device list, in case it's not sorted already.
-	devSort := virtualDeviceListSorter{
-		Sort:       devices,
-		DeviceList: l,
-	}
-	log.Printf("[DEBUG] DiskCloneValidateOperation: Disk devices order before sort: %s", DeviceListString(devices))
-	sort.Sort(devSort)
-	devices = devSort.Sort
-	log.Printf("[DEBUG] DiskCloneValidateOperation: Disk devices order after sort: %s", DeviceListString(devices))
+	// Select all the disks and sort the device list, in case it's not sorted
+	// already.
+	devices := SelectAndSortDisks(l, d.Get("scsi_controller_count").(int))
 	// Do the same for our listed disks.
 	curSet := d.Get(subresourceTypeDisk).([]interface{})
 	log.Printf("[DEBUG] DiskCloneValidateOperation: Current resource set: %s", subresourceListString(curSet))
@@ -839,16 +832,9 @@ func DiskMigrateRelocateOperation(d *schema.ResourceData, c *govmomi.Client, l o
 // configurations fully in sync with what is defined.
 func DiskCloneRelocateOperation(d *schema.ResourceData, c *govmomi.Client, l object.VirtualDeviceList) ([]types.VirtualMachineRelocateSpecDiskLocator, error) {
 	log.Printf("[DEBUG] DiskCloneRelocateOperation: Generating full disk relocate spec list")
-	devices := SelectDisks(l, d.Get("scsi_controller_count").(int))
-	log.Printf("[DEBUG] DiskCloneRelocateOperation: Disk devices located: %s", DeviceListString(devices))
-	// Sort the device list, in case it's not sorted already.
-	devSort := virtualDeviceListSorter{
-		Sort:       devices,
-		DeviceList: l,
-	}
-	sort.Sort(devSort)
-	devices = devSort.Sort
-	log.Printf("[DEBUG] DiskCloneRelocateOperation: Disk devices order after sort: %s", DeviceListString(devices))
+	// Select all the disks and sort the device list, in case it's not sorted
+	// already.
+	devices := SelectAndSortDisks(l, d.Get("scsi_controller_count").(int))
 	// Do the same for our listed disks.
 	curSet := d.Get(subresourceTypeDisk).([]interface{})
 	log.Printf("[DEBUG] DiskCloneRelocateOperation: Current resource set: %s", subresourceListString(curSet))
@@ -892,16 +878,9 @@ func DiskCloneRelocateOperation(d *schema.ResourceData, c *govmomi.Client, l obj
 // virtual device operations rely pretty heavily on.
 func DiskPostCloneOperation(d *schema.ResourceData, c *govmomi.Client, l object.VirtualDeviceList) (object.VirtualDeviceList, []types.BaseVirtualDeviceConfigSpec, error) {
 	log.Printf("[DEBUG] DiskPostCloneOperation: Looking for disk device changes post-clone")
-	devices := SelectDisks(l, d.Get("scsi_controller_count").(int))
-	log.Printf("[DEBUG] DiskPostCloneOperation: Disk devices located: %s", DeviceListString(devices))
-	// Sort the device list, in case it's not sorted already.
-	devSort := virtualDeviceListSorter{
-		Sort:       devices,
-		DeviceList: l,
-	}
-	sort.Sort(devSort)
-	devices = devSort.Sort
-	log.Printf("[DEBUG] DiskPostCloneOperation: Disk devices order after sort: %s", DeviceListString(devices))
+	// Select all the disks and sort the device list, in case it's not sorted
+	// already.
+	devices := SelectAndSortDisks(l, d.Get("scsi_controller_count").(int))
 	// Do the same for our listed disks.
 	curSet := d.Get(subresourceTypeDisk).([]interface{})
 	log.Printf("[DEBUG] DiskPostCloneOperation: Current resource set: %s", subresourceListString(curSet))
@@ -995,16 +974,9 @@ func DiskPostCloneOperation(d *schema.ResourceData, c *govmomi.Client, l object.
 // imported device list is sorted by the device's unit number on the SCSI bus.
 func DiskImportOperation(d *schema.ResourceData, c *govmomi.Client, l object.VirtualDeviceList) error {
 	log.Printf("[DEBUG] DiskImportOperation: Performing pre-read import and validation of virtual disks")
-	devices := SelectDisks(l, d.Get("scsi_controller_count").(int))
-	// Sort the device list, in case it's not sorted already.
-	devSort := virtualDeviceListSorter{
-		Sort:       devices,
-		DeviceList: l,
-	}
-	log.Printf("[DEBUG] DiskImportOperation: Disk devices order before sort: %s", DeviceListString(devices))
-	sort.Sort(devSort)
-	devices = devSort.Sort
-	log.Printf("[DEBUG] DiskImportOperation: Disk devices order after sort: %s", DeviceListString(devices))
+	// Select all the disks and sort the device list, in case it's not sorted
+	// already.
+	devices := SelectAndSortDisks(l, d.Get("scsi_controller_count").(int))
 
 	// Read in the disks. We don't do anything with the results here other than
 	// validate that the disks are SCSI disks. The read operation validates the rest.
@@ -1071,16 +1043,10 @@ func DiskImportOperation(d *schema.ResourceData, c *govmomi.Client, l object.Vir
 // order that they would be added in if a clone were to be done.
 func ReadDiskAttrsForDataSource(l object.VirtualDeviceList, count int) ([]map[string]interface{}, error) {
 	log.Printf("[DEBUG] ReadDiskAttrsForDataSource: Fetching select attributes for disks across %d SCSI controllers", count)
-	devices := SelectDisks(l, count)
-	log.Printf("[DEBUG] ReadDiskAttrsForDataSource: Disk devices located: %s", DeviceListString(devices))
-	// Sort the device list, in case it's not sorted already.
-	devSort := virtualDeviceListSorter{
-		Sort:       devices,
-		DeviceList: l,
-	}
-	sort.Sort(devSort)
-	devices = devSort.Sort
-	log.Printf("[DEBUG] ReadDiskAttrsForDataSource: Disk devices order after sort: %s", DeviceListString(devices))
+	// Select all the disks and sort the device list, in case it's not sorted
+	// already.
+	devices := SelectAndSortDisks(l, count)
+
 	var out []map[string]interface{}
 	for i, device := range devices {
 		disk := device.(*types.VirtualDisk)
@@ -1470,20 +1436,29 @@ func (r *DiskSubresource) Relocate(l object.VirtualDeviceList, clone bool) (type
 		// Default to the default datastore
 		dsID = r.rdd.Get("datastore_id").(string)
 	}
-	ds, err := datastore.FromID(r.client, dsID)
-	if err != nil {
-		return relocate, err
+
+	// We could still have an empty datastore ID if we are deploying to a
+	// datastore cluster, so make sure we check that before proceeding.
+	var ds *object.Datastore
+	var dsref types.ManagedObjectReference
+	if dsID != "" {
+		ds, err = datastore.FromID(r.client, dsID)
+		if err != nil {
+			return relocate, err
+		}
+		dsref = ds.Reference()
+		relocate.Datastore = dsref
 	}
-	dsref := ds.Reference()
-	relocate.Datastore = dsref
 
 	// Add additional backing options if we are cloning.
 	if r.rdd.Id() == "" {
 		log.Printf("[DEBUG] %s: Adding additional options to relocator for cloning", r)
 
 		backing := disk.Backing.(*types.VirtualDiskFlatVer2BackingInfo)
-		backing.FileName = ds.Path("")
-		backing.Datastore = &dsref
+		if ds != nil {
+			backing.FileName = ds.Path("")
+			backing.Datastore = &dsref
+		}
 		relocate.DiskBackingInfo = backing
 	}
 
@@ -1905,4 +1880,22 @@ func diskCapacityInGiB(disk *types.VirtualDisk) int {
 		object.VirtualDeviceList{}.Name(disk),
 	)
 	return int(structure.ByteToGiB(disk.CapacityInKB * 1024).(int64))
+}
+
+// SelectAndSortDisks takes all of the disks from a VirtualDeviceList, sorts
+// them by unit number, and returns only those devices. It's designed to be an
+// atomic operation that can be exported to workflows that exist outside of the
+// standard device sub-resource management workflow.
+func SelectAndSortDisks(l object.VirtualDeviceList, count int) object.VirtualDeviceList {
+	devices := SelectDisks(l, count)
+	log.Printf("[DEBUG] SelectAndSortDisks: Disk devices located: %s", DeviceListString(devices))
+	// Sort the device list, in case it's not sorted already.
+	devSort := virtualDeviceListSorter{
+		Sort:       devices,
+		DeviceList: l,
+	}
+	sort.Sort(devSort)
+	devices = devSort.Sort
+	log.Printf("[DEBUG] SelectAndSortDisks: Disk devices order after sort: %s", DeviceListString(devices))
+	return devices
 }

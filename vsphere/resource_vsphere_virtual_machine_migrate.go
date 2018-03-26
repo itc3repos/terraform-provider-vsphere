@@ -10,6 +10,7 @@ import (
 	"github.com/hashicorp/terraform/terraform"
 	"github.com/terraform-providers/terraform-provider-vsphere/vsphere/internal/helper/virtualmachine"
 	"github.com/terraform-providers/terraform-provider-vsphere/vsphere/internal/virtualdevice"
+	"github.com/terraform-providers/terraform-provider-vsphere/vsphere/internal/vmworkflow"
 	"github.com/vmware/govmomi/object"
 	"github.com/vmware/govmomi/vim25/types"
 )
@@ -115,7 +116,7 @@ func migrateVSphereVirtualMachineStateV3(is *terraform.InstanceState, meta inter
 	}
 
 	d := resourceVSphereVirtualMachine().Data(&terraform.InstanceState{})
-	log.Printf("[DEBUG] %s: Migration to V3 complete", resourceVSphereVirtualMachineIDString(d))
+	log.Printf("[DEBUG] %s: Migration to V3 complete", vmworkflow.ResourceIDString(d))
 	return nil
 }
 
@@ -221,7 +222,7 @@ func migrateVSphereVirtualMachineStateV2(is *terraform.InstanceState, meta inter
 		}
 	}
 
-	log.Printf("[DEBUG] %s: Migration to V2 complete", resourceVSphereVirtualMachineIDString(d))
+	log.Printf("[DEBUG] %s: Migration to V2 complete", vmworkflow.ResourceIDString(d))
 	return nil
 }
 
